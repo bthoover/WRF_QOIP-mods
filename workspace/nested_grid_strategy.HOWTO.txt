@@ -1,0 +1,175 @@
+There may be situations where it would be valuable to run the QOIP system on a nested grid - this would involve running the inner/outer loop
+algorithm on the coarse-resolution d01 grid, and then looking at the outcome on a higher-resolution d02 grid nested inside of the d01 grid.
+This can be tricky, because WRFPLUS doesn't appear to support nested grids, or at-least it's not well-enough supported for me to figure out
+using the same methodology that works with an equivalent WRFV3.8.1 configuration. However, we are able to accomplish this through a 1-way
+nested grid approach that uses nestdown (main/ndown.exe) to generate initial and boundary conditions for the nested d02 grid from a stand-
+alone d01 grid run, at which point we can just run the WRF on the high-res grid separately after perturbations have been applied to the
+parent grid.
+
+The procedure is mostly unchanged for the WRFPLUS inner/outer loop portion, with the exception that when generating initial conditions with
+WPS and main/real.exe, you should specify both d01 and d02, generating the following files:
+
+wrfinput_d01
+wrfbdy_d01
+wrfinput_d02
+
+In WPS/namelist.wps, specify the following for domain-2 by using a comma to separate d01 and d02 settings:
+
+&share:
+max_dom           = 2,
+start_date        = <'YYYY-MM-DD_HH:00:00'>,<'YYYY-MM-DD_HH:00:00'>
+end_date          = <'YYYY-MM-DD_HH:00:00'>,<'YYYY-MM-DD_HH:00:00'>
+&geogrid:
+parent_id         = 1, 1,
+parent_grid_ratio = 1, 3,
+i_parent_start    = 1, <d02 i-start of lower-left corner of grid>,
+j_parent_start    = 1, <d02 j-start of lower-left corner of grid>,
+e_we              = <d01 value>, <d02 value>,
+e_sn              = <d01 value>, <d02 value>,
+geog_data_res     = 'default', 'default',
+
+Remaining settings are for d01 only, and d02 grid will be generated at 1/3 grid spacing of d01 grid.
+
+In em_real/namelist.input, specify the following for domain-2 by using a comma to separate d01 and d02 settings:
+
+&time_control
+start_year        = <YYYY>, <YYYY>,
+start_month       = <MM>, <MM>,
+start_day         = <DD>, <DD>,
+start_hour        = <HH>, <HH>,
+end_year          = <YYYY>, <YYYY>,
+end_month         = <MM>, <MM>,
+end_day           = <DD>, <DD>,
+end_hour          = <HH>, <HH>,
+input_from_file   = true, true,
+history_interval  = <d01 value>, <d01 value>,
+frames_per_outfile= 1, 1,
+inputout_interval = <d01 value>, <d01 value>,
+inputout_begin_h  = <d01 value>, <d01 value>,
+inputout_end_h    = <d01 value>, <d01 value>,
+input_from_file   = .true.,.true.
+iofields_filename = "./plus.io_config", "./plus.io_config"
+&domains
+max_dom           = 2,
+e_we              = <d01 value>, <d02 value>,
+e_sn              = <d01 value>, <d02 value>,
+e_vert            = <d01 value>, <d02 value>,
+dx                = <d01 value>, <d02 value>,
+dy                = <d01 value>, <d02 value>,
+i_parent_start    = 0,<d02 i-start of lower-left corner of grid>,
+j_parent_start    = 0,<d02 i-start of lower-left corner of grid>,
+grid_id           = 1,2
+parent_id         = 0,1
+parent_grid_ratio = 1,2
+parent_time_step_ratio = 1,3
+&physics
+mp_physics        = <d01 value>, <d02 value>,
+ra_lw_physics     = <d01 value>, <d02 value>,
+ra_sw_physics     = <d01 value>, <d02 value>,
+radt              = <d01 value>, <d02 value>,
+sf_sfclay_physics = <d01 value>, <d02 value>,
+sf_surface_physics= <d01 value>, <d02 value>,
+bl_pbl_physics    = <d01 value>, <d02 value>,
+cu_physics        = <d01 value>, <d02 value>,
+cudt              = 0,0,
+&bdy_control
+specified         = .true., .false.
+nested            = .false., .true.
+
+Remaining settings are for d01 only. Likely the physics differences are going to be only in cu_physics, which may be set to some cumulus
+scheme in d01 but set to 0 in d02.
+
+No wrfbdy_d02 will be generated, because the boundary conditions for d02 need to be defined by the activity on the interior of d01 where
+the two domains are connected along d02's border.
+
+For QOIP, set max_dom = 1 in the namelist and run everything off of d01, producing the desired perturbed wrfinput_d01 file.
+
+Once the QOIP has been computed, you can use main/ndown.exe from the same build where main/real.exe was sourced to create initial conditions:
+
+1) Run WRF on the d01 domain, specifying the following namelist parameters:
+
+&time_control
+frames_per_outfile=1000,1000
+history_interval  = <d02 bdy interval in minutes>, <d02 bdy interval in minutes>,
+inputout_interval = <d02 bdy interval in minutes>, <d02 bdy interval in minutes>,
+&domains
+max_dom           = 1,
+
+Since d01 bdy interval is likely 6-hourly (interval_seconds=21600), history_interval and inputout_interval should be set to 120, or 2-hourly.
+This is 1/3 the time-interval of the d01 grid, matching the 1/3 spatiotemporal spacing of d02 to the parent d01 grid.
+
+This will generate a single wrfout_d01_<DATE> file containing output necessary for d02 boundary conditions.
+
+2) Change the name of the existing wrfinput_d01 to wrfndi_d02, the input to main/ndown.exe
+3) Change the following namelist parameters:
+
+&time_control
+io_form_auxinput2 = 2,
+&domains
+max_dom           = 2,
+
+4) Rename wrfinput_d01 and wrfbdy_d01 to some other name - these filenames are going to be overwritten in main/ndown.exe
+5) Run main/ndown.exe, producing:
+
+wrfinput_d01
+wrfbdy_d01
+
+Where d01 now refers to the nested inner domain. Finally, change namelist.input from your d01 run to specify d02's grid and time-resolution:
+
+&time_control
+interval_seconds  = 7200
+frames_per_outfile= 1,
+history_interval  = 60,
+inputout_interval = 60,
+&domains
+max_dom           = 1,
+time_step         = <d02 timestep>,
+e_we              = <d02 grid value>,
+e_sn              = <d02 grid value>,
+e_vert            = <d02 grid value>,
+&physics
+mp_physics        = <d02 value>,
+ra_lw_physics     = <d02 value>, 
+ra_sw_physics     = <d02 value>, 
+radt              = <d02 value>,         
+sf_sfclay_physics = <d02 value>,
+sf_surface_physics= <d02 value>,
+bl_pbl_physics    = <d02 value>,
+cu_physics        = <d02 value>,
+
+Run WRF with the new input files and namelist, and you should have a high-res nest informed by the coarse-res outer grid simulation.
+
+
+
+
+Troubleshooting:
+
+(1) If your main/ndown.exe run fails with an rsl.error.0000 error (debug=1000) that looks like this:
+------------------------------------------------------------------------------------------------
+CFA   2.0030052661895752       -1.5045078992843628       0.50150263309478760        1.5015014410018921      -0.50150150060653687        1.0000000000000000       0.991649
+98531341553
+At line 407 of file ndown_em.f90
+Fortran runtime error: End of record
+
+Error termination. Backtrace:
+#0  0x145fb9a14171 in ???
+#1  0x145fb9a14d19 in ???
+#2  0x145fb9a15521 in ???
+#3  0x145fb9c1b148 in ???
+#4  0x145fb9c22ca4 in ???
+#5  0x145fb9c27c41 in ???
+#6  0x145fb9c27f2d in ???
+#7  0x145fb9c28d14 in ???
+------------------------------------------------------------------------------------------------
+The problem may be that you are trying to use main/ndown.exe from WRFPLUSV3. You need to be using the main/ndown.exe from the build
+that you used to generate your initial conditions, e.g. WRFV3.8.1/ or something similar.
+
+(2) In documentation online, e.g. https://www2.mmm.ucar.edu/wrf/OnLineTutorial/CASES/NestRuns/ndown2.php. it states that the nestdown step
+requires that your namelist.input &time_control include double-values for the run-time, e.g.:
+
+run_hours = 24, 24,
+
+However, you will probably run into an error if you do that, with main/ndown.exe failing rapidly and an error message saying there was an
+error in reading namelist.input. In reality, you only specify this &time_control variable once, e.g.:
+
+run_hours = 24,

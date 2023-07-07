@@ -1,0 +1,220 @@
+#########################################################################
+#
+# PYTHON 3 PROGRAM
+#
+# Given an adjoint file (gradient_wrfplus_d<domain>_<date-time>) and a
+# target change to a response function (dR), this program computes the
+# optimal U, V, T perturbations subject to a kinetic and available
+# potential energy cost-function:
+#
+# f(u,v,t) = 0.5 * [u^2 + v^2 + (cp/T0)*t^2]
+#
+# As per Ehrendorfer, M., R. M. Errico, and K. D. Raeder, 1999: 
+# Singular-vector perturabtion growth in a primative equation model with
+# moist physics. Journal of the Atmospheric Sciences, 56, 1627-1648,
+# doi: 10.1175/1520-0469(1999)056<1627:SVPGIA>2.0.CO;2
+#
+# This cost-function does not contain a pressure term, nor a moisture
+# term. The pressure term is ommitted since the WRF adjoint is not
+# (currently) capable of providing sensitivity of R with respect to
+# pressure. There is a sensitivity with respect to water vapor mixing
+# ratio, but no moisture term is currently provided here because there
+# is a concern about creating supersaturated regions with a moisture
+# perturbation completely determined by sensitivity. There may be an
+# adjustment in the future to provide a compensating moisture term,
+# complimenting the temperature perturbation to keep the relative
+# humidity constant, that could utilize the sensitivity to water
+# vapor mixing ratio in order to provide a refined correction to
+# the impact of the perturbation.
+#
+# 04 Sep 2021: For this run (Ida 2021), I am adding functionality to
+#              zero-out sensitivity outside of a min/max sigma level
+#              so we can focus on perturbation to the outflow layer.
+#
+# 30 Sep 2021: The zero-out functionality is being modified, because it's
+#              possible that the effectively top-hat function applied as
+#              a weighting function is too harsh. I am instead adding
+#              functionality to apply a smoother weighting function that
+#              peaks at the level of maximum divergence in a 21x21 box
+#              centered on the TC, and extends down to k=29 (roughly half
+#              the way down the column). Uses a PERT(-beta) distribution
+#              to define the weighting function, because it's easy to
+#              specify a minimum, mode, and maximum value.
+#
+#########################################################################
+#
+# Import necessary modules
+#
+import numpy as np #..................................................... array module
+from netCDF4 import Dataset #............................................ netCDF i/o module
+from qoip_dependencies import compute_optimal_perturbation #............. optimal perturbation module
+from scipy.stats import beta #........................................... beta distribution module
+#
+#########################################################################
+#
+# Obtain inputs from user
+#
+sens_file       = input() #.............................................. full path to gradient_wrfplus_d<domain>_<date-time> file
+dR_str          = input() #.............................................. target change to response function (string-format)
+nc_outfile_name = input() #.............................................. full path to output netCDF file containing optimal perturbations
+# Convert dR_str to dR
+dR = float(dR_str)
+#
+#########################################################################
+#
+# Extract sensitivity gradients from sens_file
+#
+sens_hdl = Dataset(sens_file) #.......................................... netCDF file handle for sens_file
+sens_u = np.asarray(sens_hdl.variables['A_U']).squeeze() #............... sensitivity to zonal wind [lev,lat,lon]
+sens_v = np.asarray(sens_hdl.variables['A_V']).squeeze() #............... sensitivity to merid wind [lev,lat,lon]
+sens_t = np.asarray(sens_hdl.variables['A_T']).squeeze() #............... sensitivity to (potential) temperature [lev,lat,lon]
+nz,ny,nx = np.shape(sens_t) #............................................ dimensions on cross-points
+#
+# Given a minimum, mode, and maximum k-value, generate a PERT(-beta)
+# weighting function to apply to sensitivity to (u,v,T) that focuses on
+# the upper-troposphere. The mode is defined for Ida at level k=54, where
+# the total divergence in a 21x21 box centered on the TC is maximized.
+# The minimum value is k=29, roughly the half-way point in the column,
+# and the maximum value is k=59, the top-level. The weighting function
+# reaches zero at the minimum and maximum values and remains zero outside
+# of the range between the minimum and maximum.
+#
+# Since this is a weighting function, we will define the PERT PDF and
+# normalize by the maximum value on np.arange(nz), so that the weight is
+# w=1.0 at the mode and decays in both directions away from the mode. 
+# 
+kmin=29. #............................................................... minimum k-value for weighting function (w=0.0 for k <= kmin)
+kmode=54. #.............................................................. k-value where weighting function reaches w=1.0
+kmax=59. #............................................................... maximum k-value for weighting function (w=0.0 for k >= kmax) 
+#
+# To produce a PERT(-beta) distribution, we have to define the shape
+# parameters (PERT_a,PERT_b) to conform to the min/mode/max settings.
+# The distribution is then solvable via:
+#
+# PERT = scipy.stats.beta(PERT_a,PERT_b,loc=kmin,scale=kmax-kmin)
+#
+# See https://en.wikipedia.org/wiki/PERT_distribution
+#
+# Solve for the mean value
+kmean = (kmin + 4.*kmode + kmax)/6. #................................... mean k-value for weighting function, constrained by PERT formula
+# Define PERT_a
+PERT_a = 6.*((kmean - kmin)/(kmax - kmin)) #............................ PERT shape parameter a
+# Define PERT_b
+PERT_b = 6.*((kmax - kmean)/(kmax - kmin)) #............................ PERT shape parameter b
+# Create PERT distribution
+pd = beta(PERT_a,PERT_b,loc=kmin,scale=kmax-kmin) #..................... PERT distribution
+# Create PDF on np.arange(nz)
+p = pd.pdf(np.arange(nz)) #............................................. PERT PDF on np.arange(nz)
+# Define w as p/np.max(p), generating a weighting function with w=1.0
+# at the mode
+w = p/np.max(p) #...................................................... PERT weighting function
+# Apply weighting function to sens_u, sens_v, sens_t
+
+for k in range(nz):
+    sens_u[k,:,:] = w[k] * sens_u[k,:,:]
+    sens_v[k,:,:] = w[k] * sens_v[k,:,:]
+    sens_t[k,:,:] = w[k] * sens_t[k,:,:]
+#
+#########################################################################
+#
+# Compute optimal u, v, t perturbations
+#
+# Define inputs to compute_optimal_perturbation() function
+cp = 1004. #............................................................ heat capacity of air at constant pressure (J/kg)
+t0 = 270. #............................................................. reference temperature (K)
+#
+W_u = 1.0 #............................................................. weighting coefficient for zonal wind in cost-function
+W_v = 1.0 #............................................................. weighting coefficient for merid wind in cost-function
+W_t = cp/t0 #........................................................... weighting coefficient for temperature in cost-function
+#
+W = [W_u,W_v,W_t] #..................................................... list of weighting coefficients [u,v,t]
+S = [sens_u,sens_v,sens_t] #............................................ list of sensitivity gradient grids [u,v,t]
+# Define optimal perturbations
+opts = compute_optimal_perturbation(dR,W,S) #........................... list of optimal perturbation grids [u,v,t]
+# divide S into discrete variables
+opt_u = opts[0] #....................................................... optimal zonal wind perturbation [lev,lat,lon]
+opt_v = opts[1] #....................................................... optimal merid wind perturbation [lev,lat,lon]
+opt_t = opts[2] #....................................................... optimal temperature perturbation [lev,lat,lon]
+#
+#########################################################################
+#
+# Write to netCDF file (presumed to not exist, will be created, no
+# clobbering but errors if file exists)
+#
+nc_out = Dataset( #...................................................... Dataset object for output
+                  nc_outfile_name  , # Dataset input: Output file name
+                  "w"              , # Dataset input: Make file write-able
+                  format="NETCDF4" , # Dataset input: Set output format to netCDF4
+                )
+# Dimensions
+lat_vstag  = nc_out.createDimension( #................................... Output dimension
+                                     "lat_vstag" , # nc_out.createDimension input: Dimension name 
+                                      None         # nc_out.createDimension input: Dimension size limit ("None" == unlimited)
+                                   )
+lat  = nc_out.createDimension( #......................................... Output dimension
+                               "lat" , # nc_out.createDimension input: Dimension name 
+                                None   # nc_out.createDimension input: Dimension size limit ("None" == unlimited)
+                             )
+lon_ustag  = nc_out.createDimension( #................................... Output dimension
+                                     "lon_ustag" , # nc_out.createDimension input: Dimension name 
+                                      None         # nc_out.createDimension input: Dimension size limit ("None" == unlimited)
+                                   )
+lon  = nc_out.createDimension( #......................................... Output dimension
+                               "lon" , # nc_out.createDimension input: Dimension name 
+                               None    # nc_out.createDimension input: Dimension size limit ("None" == unlimited)
+                             )
+lev = nc_out.createDimension( #.......................................... Output dimension
+                               "lev" , # nc_out.createDimension input: Dimension name 
+                               None    # nc_out.createDimension input: Dimension size limit ("None" == unlimited)
+                             )
+param = nc_out.createDimension( #........................................ Output dimension
+                               "param" , # nc_out.createDimension input: Dimension name 
+                               None      # nc_out.createDimension input: Dimension size limit ("None" == unlimited)
+                             )
+# Variables
+OPT_U_PERT = nc_out.createVariable( #.................................... Output variable
+                                    "OPT_U_PERT"  , # nc_out.createVariable input: Variable name 
+                                    "f8"          , # nc_out.createVariable input: Variable format 
+                                    ( 
+                                      "lev"       , # nc_out.createVariable input: Variable dimension
+                                      "lat"       , # nc_out.createVariable input: Variable dimension
+                                      "lon_ustag"   # nc_out.createVariable input: Variable dimension
+                                    )
+                                  )
+OPT_V_PERT = nc_out.createVariable( #.................................... Output variable
+                                    "OPT_V_PERT"  , # nc_out.createVariable input: Variable name 
+                                    "f8"          , # nc_out.createVariable input: Variable format 
+                                    ( 
+                                      "lev"       , # nc_out.createVariable input: Variable dimension
+                                      "lat_vstag" , # nc_out.createVariable input: Variable dimension
+                                      "lon"         # nc_out.createVariable input: Variable dimension
+                                    )
+                                  )
+OPT_T_PERT = nc_out.createVariable( #.................................... Output variable
+                                    "OPT_T_PERT"  , # nc_out.createVariable input: Variable name 
+                                    "f8"          , # nc_out.createVariable input: Variable format 
+                                    ( 
+                                      "lev"       , # nc_out.createVariable input: Variable dimension
+                                      "lat"       , # nc_out.createVariable input: Variable dimension
+                                      "lon"         # nc_out.createVariable input: Variable dimension
+                                    )
+                                  )
+DEL_R = nc_out.createVariable( #......................................... Output variable
+                               "DEL_R"   , # nc_out.createVariable input: Variable name 
+                               "f8"      , # nc_out.createVariable input: Variable format 
+                               ( 
+                                 "param"   # nc_out.createVariable input: Variable dimension
+                               )
+                             )
+# Fill netCDF arrays via slicing
+OPT_U_PERT[:,:,:] = opt_u
+OPT_V_PERT[:,:,:] = opt_v
+OPT_T_PERT[:,:,:] = opt_t
+DEL_R[:] = dR
+# Close netCDF file
+nc_out.close()
+#
+#########################################################################
+#
+# END
+#

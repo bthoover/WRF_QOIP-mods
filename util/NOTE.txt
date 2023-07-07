@@ -1,0 +1,40 @@
+UPPER_TROP:
+
+To focus on the upper troposphere, 2 modifications are made to util/ programs:
+
+compute_optimal_perturbation.py
+compute_DELTAR_delR_ratio_error.py
+
+You need to use the *_UPPER_TROP versions of both of these programs when running QOIP, and replicate settings
+changes in each independently to construct the upper-tropospheric weighting (should be identical weighting in
+each, but has to be set in both programs).
+
+The upper-tropospheric weighting mechanism is based on defining a beta distribution with the PERT function to
+compute a smooth weighting that maximizes at a chosen level and tapers to zero outside of two chosen boundary
+levels. This is in-effect a smoothing of a triangular distribution. For the use-case of investigating the
+outflow level of a hurricane, I set the maximized weighting level to the perceived level of maximum divergence
+over the hurricane, and the boundary levels to the top-level and roughly the halfway-point of the column. You
+could choose to set these any way you want so long as the mode is in-between the min and max levels (a sanity
+check requirement), and while this is called "UPPER_TROP" you could just as easily set this to focus on the
+mid-levels or lower-trop as needed.
+
+The weighting is all relative to the PERT distribution value at the maximized level (the mode), so the weight
+is 1.0 at this level and decays to 0.0 as you approach the boundary-levels. Settings are:
+
+kmin (float)  : minimum k-value for weighting function (w=0.0 for k <= kmin)
+kmode (float) : k-value where weighting function reaches w=1.0
+kmax (float)  : maximum k-value for weighting function (w=0.0 for k >= kmax)
+
+
+
+
+NO_COMPENSATING_MOISTURE:
+
+If you want to turn off the compensating moisture term and only perturb the other variables, you can do it
+with the modifed version of:
+
+add_optimal_perturbation.py
+
+In this version, the compensating moisture term is computed, but never passed along to the wrfinput file.
+
+You could use this same method to zero-out other variables if desired.
