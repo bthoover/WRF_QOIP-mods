@@ -1,13 +1,14 @@
 UPPER_TROP:
 
-To focus on the upper troposphere, 2 modifications are made to util/ programs:
+To focus on the upper troposphere, modifications are made to util/ programs:
 
 compute_optimal_perturbation.py
-compute_DELTAR_delR_ratio_error.py
 
-You need to use the *_UPPER_TROP versions of both of these programs when running QOIP, and replicate settings
-changes in each independently to construct the upper-tropospheric weighting (should be identical weighting in
-each, but has to be set in both programs).
+You need to use the *_UPPER_TROP versions of the optimal pert program but use the regular 
+compute_DELTAR_delR_ratio.py when running QOIP, see dev notes under "Bug-fix: Computing optimal perturbations
+when weighting vertical levels". No weighting should be applied when computing inner loop stats, the fixed
+optimal perturbation code here will rescale the optimal perturbation correctly before passing to the inner
+loop.
 
 The upper-tropospheric weighting mechanism is based on defining a beta distribution with the PERT function to
 compute a smooth weighting that maximizes at a chosen level and tapers to zero outside of two chosen boundary

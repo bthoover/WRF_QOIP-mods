@@ -41,6 +41,16 @@
 #              to define the weighting function, because it's easy to
 #              specify a minimum, mode, and maximum value.
 #
+#
+# 12 Jul 2023: I am realizing that when weighting sensitivity with
+#              anything except a top-hat (0. or 1.) weighting, I need
+#              to rescale the optimal perturbation after generating them
+#              because the optimal is presuming weaker sensitivity in
+#              downweighted levels than is actually there. So I have to
+#              compute the optimal, then compute the estimated delR
+#              against the unweighted sensitivity, and rescale the
+#              the perturbation to bring the impact back down to the
+#              requested delR value.
 #########################################################################
 #
 # Import necessary modules
@@ -109,11 +119,13 @@ p = pd.pdf(np.arange(nz)) #............................................. PERT PD
 # at the mode
 w = p/np.max(p) #...................................................... PERT weighting function
 # Apply weighting function to sens_u, sens_v, sens_t
-
+sens_u_wgt = np.zeros(np.shape(sens_u))
+sens_v_wgt = np.zeros(np.shape(sens_v))
+sens_t_wgt = np.zeros(np.shape(sens_t))
 for k in range(nz):
-    sens_u[k,:,:] = w[k] * sens_u[k,:,:]
-    sens_v[k,:,:] = w[k] * sens_v[k,:,:]
-    sens_t[k,:,:] = w[k] * sens_t[k,:,:]
+    sens_u_wgt[k,:,:] = w[k] * sens_u[k,:,:]
+    sens_v_wgt[k,:,:] = w[k] * sens_v[k,:,:]
+    sens_t_wgt[k,:,:] = w[k] * sens_t[k,:,:]
 #
 #########################################################################
 #
@@ -128,13 +140,21 @@ W_v = 1.0 #............................................................. weighti
 W_t = cp/t0 #........................................................... weighting coefficient for temperature in cost-function
 #
 W = [W_u,W_v,W_t] #..................................................... list of weighting coefficients [u,v,t]
-S = [sens_u,sens_v,sens_t] #............................................ list of sensitivity gradient grids [u,v,t]
+S = [sens_u_wgt,sens_v_wgt,sens_t_wgt] #................................ list of sensitivity gradient grids [u,v,t]
 # Define optimal perturbations
 opts = compute_optimal_perturbation(dR,W,S) #........................... list of optimal perturbation grids [u,v,t]
 # divide S into discrete variables
 opt_u = opts[0] #....................................................... optimal zonal wind perturbation [lev,lat,lon]
 opt_v = opts[1] #....................................................... optimal merid wind perturbation [lev,lat,lon]
 opt_t = opts[2] #....................................................... optimal temperature perturbation [lev,lat,lon]
+# compute impact of optimal perturbation on unweighted sensitivity
+dRuw = (np.sum(np.multiply(opt_u,sens_u)) + #........................... unweighted dR (eval. against unweighted sens.)
+        np.sum(np.multiply(opt_v,sens_v)) +
+        np.sum(np.multiply(opt_t,sens_t)))
+# scale optimal perturbation by dR/dRuw
+opt_u = (dR/dRuw)*opt_u
+opt_v = (dR/dRuw)*opt_v
+opt_t = (dR/dRuw)*opt_t
 #
 #########################################################################
 #
